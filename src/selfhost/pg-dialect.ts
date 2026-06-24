@@ -69,13 +69,36 @@ export function translateInsertOr(sql: string): string {
   return sql;
 }
 
-/** Translate a runtime query (SQLite → Postgres). */
-export function translateSql(sql: string): string {
-  return toNumberedPlaceholders(translateFunctions(translateInsertOr(sql)));
+/** Strip table qualifiers from an ON CONFLICT target list. drizzle-orm/d1 emits the conflict target as
+ *  `ON CONFLICT ("table"."col")` — valid in SQLite, but Postgres requires an unqualified column list
+ *  (`ON CONFLICT ("col")`) and otherwise fails with a syntax error, breaking every Drizzle upsert
+ *  (e.g. recordWebhookEvent → webhook ingest) on the Postgres backend. Scoped to the conflict-target
+ *  parens so qualified column refs elsewhere (WHERE / SELECT / joins) are left intact. */
+export function stripConflictTargetQualifiers(sql: string): string {
+  // Capture the keyword + opening paren and the closing paren so the original casing/spacing is preserved
+  // (drizzle emits lowercase `on conflict`); only the inner target list is rewritten.
+  return sql.replace(
+    /(\bON\s+CONFLICT\s*\()([^)]*)(\))/gi,
+    (_full, open: string, target: string, close: string) => `${open}${target.replace(/"[^"]+"\s*\.\s*("[^"]+")/g, "$1")}${close}`,
+  );
 }
 
-/** Translate a DDL statement (migrations). Column types (TEXT/INTEGER/REAL) are PG-native; only the SQLite
- *  default expressions need translating. No `?` placeholders in DDL. */
+/** Translate a runtime query (SQLite → Postgres). */
+export function translateSql(sql: string): string {
+  return toNumberedPlaceholders(stripConflictTargetQualifiers(translateFunctions(translateInsertOr(sql))));
+}
+
+/** Migrations are applied as whole multi-statement files via exec(), so the statement-anchored
+ *  translateInsertOr() can't reach an `INSERT OR IGNORE` embedded mid-file (e.g. the global_agent_controls
+ *  seed in 0059). Rewrite each such statement to Postgres `INSERT … ON CONFLICT DO NOTHING`. Only IGNORE
+ *  seeds exist in migrations; an INSERT OR REPLACE statement would need a known conflict key, so it is left
+ *  untouched (and would surface as a clear Postgres error) rather than guessed at. */
+export function translateMigrationInserts(sql: string): string {
+  return sql.replace(/INSERT\s+OR\s+IGNORE\s+INTO\b([^;]*);/gi, "INSERT INTO$1 ON CONFLICT DO NOTHING;");
+}
+
+/** Translate a DDL statement (migrations). Column types (TEXT/INTEGER/REAL) are PG-native; the SQLite
+ *  default expressions need translating, as does any `INSERT OR IGNORE` seed. No `?` placeholders in DDL. */
 export function translateDdl(sql: string): string {
-  return translateFunctions(sql);
+  return translateFunctions(translateMigrationInserts(sql));
 }
