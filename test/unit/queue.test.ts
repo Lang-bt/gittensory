@@ -44,7 +44,7 @@ import {
   upsertRepositoryFromGitHub,
   putCachedAiReview,
 } from "../../src/db/repositories";
-import { agentMaintenanceHeadMatchesGate, changedPathsForGuardrail, contributorEvidenceBatchSize, processJob } from "../../src/queue/processors";
+import { agentMaintenanceHeadMatchesGate, changedPathsForGuardrail, claimAgentMaintenanceLock, contributorEvidenceBatchSize, processJob, releaseAgentMaintenanceLock } from "../../src/queue/processors";
 import { aiReviewCacheInputFingerprint } from "../../src/review/ai-review-cache-input";
 import { upsertRepoFocusManifest } from "../../src/signals/focus-manifest-loader";
 import { normalizeRegistryPayload } from "../../src/registry/normalize";
@@ -2920,6 +2920,132 @@ describe("queue processors", () => {
     expect(sent.filter((m) => m.type === "agent-regate-sweep")).toEqual([]); // enqueues no redundant sweep
     const denied = await env.DB.prepare("select count(*) as n from audit_events where event_type='agent.sweep.fanout' and outcome='denied'").first<{ n: number }>();
     expect(denied?.n).toBe(1);
+  });
+
+  it("claimAgentMaintenanceLock claims when free, denies when held (per-PR, not per-repo), and release frees it again (#2129)", async () => {
+    const env = createTestEnv({});
+    // First claim for this PR succeeds — no prior pass in-flight.
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(true);
+    // A second, concurrent pass for the SAME PR (regardless of what triggered it — webhook or sweep) is denied
+    // while the first is still in-flight — exactly the race #2129 describes, since job-coalesce keys never
+    // match across trigger shapes but this lock is keyed purely on repo+PR.
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(false);
+    // A DIFFERENT PR in the same repo is unaffected — the lock is per-PR, not a repo-wide serializer.
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 8)).toBe(true);
+    // Release (the finally block's job) frees the PR — a subsequent pass can claim it again.
+    await releaseAgentMaintenanceLock(env, "owner/agent-repo", 7);
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(true);
+  });
+
+  it("claimAgentMaintenanceLock fails OPEN on a broken transient cache — never itself blocks actuation (#2129)", async () => {
+    const env = createTestEnv({
+      SELFHOST_TRANSIENT_CACHE: {
+        get: async () => { throw new Error("cache read error"); },
+        set: async () => { throw new Error("cache write error"); },
+        del: async () => { throw new Error("cache delete error"); },
+      },
+    });
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(true);
+    await expect(releaseAgentMaintenanceLock(env, "owner/agent-repo", 7)).resolves.toBeUndefined();
+  });
+
+  it("claimAgentMaintenanceLock fails OPEN when the atomic claim primitive itself throws (#2368)", async () => {
+    const env = createTestEnv({
+      SELFHOST_TRANSIENT_CACHE: {
+        get: async () => null,
+        set: async () => undefined,
+        claim: async () => { throw new Error("redis unavailable"); },
+      },
+    });
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(true);
+  });
+
+  it("REGRESSION (#2368): claimAgentMaintenanceLock uses an atomic check-and-set, so two genuinely concurrent claims for the SAME PR can never both succeed", async () => {
+    // #2368: a get-then-set pair has a window between the read and the write where two concurrent callers can
+    // both observe an absent key and both claim it — exactly what the per-PR lock exists to prevent. This test
+    // races two claims for the same PR via Promise.all (both kick off before either resolves) against the
+    // default test cache's claim(), which mirrors createRedisCache's atomic SET NX: the check-and-set happens
+    // with no `await` boundary in between, so it is impossible for both callers to see "unclaimed".
+    const env = createTestEnv({});
+    const [first, second] = await Promise.all([
+      claimAgentMaintenanceLock(env, "owner/agent-repo", 7),
+      claimAgentMaintenanceLock(env, "owner/agent-repo", 7),
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("REGRESSION (#2368): claimAgentMaintenanceLock calls the atomic claim primitive, not a separate get+set pair, when the cache supports it", async () => {
+    const calls: string[] = [];
+    const env = createTestEnv({
+      SELFHOST_TRANSIENT_CACHE: {
+        get: async () => { calls.push("get"); return null; },
+        set: async () => { calls.push("set"); },
+        claim: async () => { calls.push("claim"); return true; },
+      },
+    });
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(true);
+    expect(calls).toEqual(["claim"]); // never falls through to the racy get/set pair when claim is available
+  });
+
+  it("claimAgentMaintenanceLock falls back to the get/set pair and still denies a held key when the cache has no claim() (#2368)", async () => {
+    // A cache adapter that hasn't implemented the atomic claim() primitive yet must still deny a second claim —
+    // just via the older, non-atomic get-then-set pair (documented as strictly no worse than this function's
+    // prior behavior), not by skipping the check entirely.
+    const values = new Map<string, string>();
+    const env = createTestEnv({
+      SELFHOST_TRANSIENT_CACHE: {
+        get: async (key: string) => values.get(key) ?? null,
+        set: async (key: string, value: string) => { values.set(key, value); },
+      },
+    });
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(true);
+    expect(await claimAgentMaintenanceLock(env, "owner/agent-repo", 7)).toBe(false);
+  });
+
+  it("INVARIANT (#2129 per-PR lock): a maintenance pass defers when another pass already holds the PR's lock", async () => {
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    await upsertInstallation(env, { action: "created", installation: { id: 9001, account: { login: "owner", id: 1, type: "Organization" }, target_type: "Organization", repository_selection: "selected", permissions: {}, events: [] } });
+    await upsertRepositoryFromGitHub(env, { name: "agent-repo", full_name: "owner/agent-repo", private: false, owner: { login: "owner" } }, 9001);
+    await upsertRepositorySettings(env, { repoFullName: "owner/agent-repo", autonomy: { merge: "auto" }, aiReviewMode: "off", gatePack: "oss-anti-slop", gateCheckMode: "enabled", checkRunMode: "off", commentMode: "off", publicSurface: "off" });
+    await upsertPullRequestFromGitHub(env, "owner/agent-repo", { number: 7, title: "Clean PR", state: "open", user: { login: "contributor" }, head: { sha: "a7" }, labels: [], body: "Closes #1" });
+    let mergeCalls = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
+      if (url.includes("/pulls/7/files")) return Response.json([{ filename: "src/a.ts", status: "modified", additions: 1, deletions: 0, changes: 1, patch: "@@\n+export const ok = true;" }]);
+      if (url.includes("/pulls/7/merge")) {
+        mergeCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (url.includes("/pulls/7/reviews") && init?.method === "POST") return Response.json({ id: 1 });
+      if (url.includes("/pulls/7/reviews")) return Response.json([]);
+      // Only the bare PR resource (no sub-path) — the more specific checks above already claimed
+      // /pulls/7/files, /pulls/7/merge, and /pulls/7/reviews.
+      if (/\/pulls\/7(\?|$)/.test(url)) return Response.json({ number: 7, title: "Clean PR", state: "open", user: { login: "contributor" }, head: { sha: "a7" }, labels: [], body: "Closes #1", mergeable_state: "clean" });
+      if (url.includes("/commits/a7/check-runs")) return Response.json({ total_count: 0, check_runs: [] });
+      if (url.includes("/commits/a7/status")) return Response.json({ state: "success", statuses: [] });
+      if (url.includes("/commits/a7/check-suites")) return Response.json({ check_suites: [] });
+      if (url.includes("/issues/1")) return Response.json({ number: 1, title: "Issue", state: "open", labels: [], user: { login: "reporter" } });
+      if (url.includes("/branches/")) return Response.json({ protected: false, protection: { required_status_checks: { contexts: [] } } });
+      if (url.includes(".gittensory.yml")) return new Response("Not Found", { status: 404 });
+      if (url.endsWith("/check-runs") && init?.method === "POST") return Response.json({ id: 1 });
+      if (url === "https://api.gittensor.io/miners") return Response.json([]);
+      if (url.endsWith("/graphql")) return Response.json({ data: {} });
+      return Response.json({});
+    });
+    vi.setSystemTime(new Date("2026-05-28T02:00:00.000Z"));
+
+    // Simulate a webhook pass already in-flight for this exact PR — a github-webhook:pr-refresh job's coalesce
+    // key never matches agent-regate-pr's, so the two would never dedup against each other pre-#2129; the new
+    // per-PR advisory lock is what makes a second, independently-triggered pass defer instead of racing it.
+    await env.SELFHOST_TRANSIENT_CACHE?.set("agent-maintenance-lock:owner/agent-repo#7", "1", 60);
+
+    await processJob(env, { type: "agent-regate-pr", deliveryId: "race-sweep", repoFullName: "owner/agent-repo", prNumber: 7, installationId: 9001 });
+
+    // The held lock made this pass skip its plan-and-execute critical section entirely — no mutation attempted.
+    expect(mergeCalls).toBe(0);
+    const actionAudits = await env.DB.prepare("select count(*) as n from audit_events where event_type like 'agent.action.%'").first<{ n: number }>();
+    expect(actionAudits?.n).toBe(0);
   });
 
   it("the sweep stamps the marker INLINE when the repo has no installation (audit-only, still converges) (#audit-sweep-fanout)", async () => {
