@@ -1103,6 +1103,12 @@ export async function getRepoQueueTrendSnapshot(env: Env, repoFullName: string):
   return row ? toRepoQueueTrendSnapshotRecord(row) : null;
 }
 
+// PARTIAL-UPDATE CONTRACT: an omitted (`undefined`) field on `state` leaves that column UNCHANGED on conflict —
+// drizzle's `onConflictDoUpdate` strips `undefined` entries from the generated SQL `SET` clause rather than
+// writing NULL. Every "running" pre-fetch stamp (backfill.ts) relies on this to touch only `status` without
+// clearing the PREVIOUS `headSha`/`*SyncedAt` row — including the repo+PR+headSha file cache
+// (#audit-rate-headroom), which would silently stop hitting if a future edit here coalesced an omitted field to
+// `null` (e.g. `headSha: state.headSha ?? null`). Pass `null` explicitly to actually clear a column.
 export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequestDetailSyncStateRecord): Promise<void> {
   const db = getDb(env.DB);
   await db
@@ -1112,6 +1118,7 @@ export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequ
       repoFullName: state.repoFullName,
       pullNumber: state.pullNumber,
       status: state.status,
+      headSha: state.headSha,
       filesSyncedAt: state.filesSyncedAt,
       reviewsSyncedAt: state.reviewsSyncedAt,
       checksSyncedAt: state.checksSyncedAt,
@@ -1123,6 +1130,7 @@ export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequ
       target: [pullRequestDetailSyncState.repoFullName, pullRequestDetailSyncState.pullNumber],
       set: {
         status: state.status,
+        headSha: state.headSha,
         filesSyncedAt: state.filesSyncedAt,
         reviewsSyncedAt: state.reviewsSyncedAt,
         checksSyncedAt: state.checksSyncedAt,
@@ -1131,6 +1139,16 @@ export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequ
         updatedAt: nowIso(),
       },
     });
+}
+
+export async function getPullRequestDetailSyncState(env: Env, fullName: string, pullNumber: number): Promise<PullRequestDetailSyncStateRecord | null> {
+  const db = getDb(env.DB);
+  const [row] = await db
+    .select()
+    .from(pullRequestDetailSyncState)
+    .where(and(eq(pullRequestDetailSyncState.repoFullName, fullName), eq(pullRequestDetailSyncState.pullNumber, pullNumber)))
+    .limit(1);
+  return row ? toPullRequestDetailSyncStateRecord(row) : null;
 }
 
 export async function listPullRequestDetailSyncStates(env: Env, fullName: string): Promise<PullRequestDetailSyncStateRecord[]> {
@@ -4152,6 +4170,7 @@ function toPullRequestDetailSyncStateRecord(row: typeof pullRequestDetailSyncSta
     repoFullName: row.repoFullName,
     pullNumber: row.pullNumber,
     status: parsePullRequestDetailSyncStatus(row.status),
+    headSha: row.headSha,
     filesSyncedAt: row.filesSyncedAt,
     reviewsSyncedAt: row.reviewsSyncedAt,
     checksSyncedAt: row.checksSyncedAt,
