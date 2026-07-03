@@ -741,6 +741,13 @@ function normalizeOptionalString(value: JsonValue | undefined, field: string, wa
   return null;
 }
 
+// Keep the review-nag lookback operationally bounded so repo-controlled config cannot overflow Date
+// arithmetic. Duplicated from settings/agent-actions.ts's own MAX_REVIEW_NAG_COOLDOWN_DAYS (same value,
+// same rationale) rather than imported: this module is part of the UI package's typechecked closure, and
+// agent-actions.ts transitively imports github/commands.ts -> utils/crypto.ts, pulling a heavier
+// GitHub-App-specific dependency chain into the UI build for one small constant.
+const MAX_REVIEW_NAG_COOLDOWN_DAYS = 365;
+
 /**
  * Parse the optional `settings:` mapping — a partial repository-settings override. Only recognized
  * fields are kept; unknown/invalid values are dropped with a warning and never throw.
@@ -859,7 +866,10 @@ function parseSettingsOverride(value: JsonValue | undefined, warnings: string[])
   const reviewNagMaxPings = normalizeOptionalPositiveInteger(r.reviewNagMaxPings, "settings.reviewNagMaxPings", warnings);
   if (reviewNagMaxPings !== null) out.reviewNagMaxPings = reviewNagMaxPings;
   const reviewNagCooldownDays = normalizeOptionalPositiveInteger(r.reviewNagCooldownDays, "settings.reviewNagCooldownDays", warnings);
-  if (reviewNagCooldownDays !== null) out.reviewNagCooldownDays = reviewNagCooldownDays;
+  if (reviewNagCooldownDays !== null && reviewNagCooldownDays <= MAX_REVIEW_NAG_COOLDOWN_DAYS) out.reviewNagCooldownDays = reviewNagCooldownDays;
+  if (reviewNagCooldownDays !== null && reviewNagCooldownDays > MAX_REVIEW_NAG_COOLDOWN_DAYS) {
+    warnings.push(`Manifest field "settings.reviewNagCooldownDays" must be at most ${MAX_REVIEW_NAG_COOLDOWN_DAYS}; ignoring it.`);
+  }
   const reviewNagLabel = normalizeOptionalString(r.reviewNagLabel, "settings.reviewNagLabel", warnings);
   if (reviewNagLabel !== null) out.reviewNagLabel = reviewNagLabel;
   // Shared repo-scoped exemption list (#2463): only set it when at least one VALID login survives
