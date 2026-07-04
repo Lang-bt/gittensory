@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,6 +20,7 @@ const currentApiVersion = "0.1.0";
 const decisionPackCacheSchemaVersion = 1;
 const decisionPackCacheMaxEntries = 25;
 const decisionPackCacheMaxBytes = 512 * 1024;
+const cliTextFileMaxBytes = 1024 * 1024;
 const changelogPath = new URL("../CHANGELOG.md", import.meta.url);
 const cliArgs = process.argv.slice(2);
 const defaultProfileName = "default";
@@ -1484,6 +1485,42 @@ async function runCli(args) {
   writeBranchAnalysisCli(result, command);
 }
 
+// Opens, type-checks, and reads the file through ONE file descriptor rather than a separate
+// stat-then-read pair: a check-then-read on a path string leaves a race window where a symlink or
+// special file (FIFO, device) can be swapped in between the two calls, letting the earlier
+// isFile()/size validation apply to a different, unvalidated file than the one actually read.
+// O_NOFOLLOW makes a symlinked path fail to open outright instead of silently following it.
+function readCliTextFile(path, label) {
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (error && error.code === "ENOENT") throw new Error(`${label} file not found: ${path}`);
+    if (error && (error.code === "ELOOP" || error.code === "EMLINK")) throw new Error(`${label} file must be a regular file: ${path}`);
+    throw error;
+  }
+  try {
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) throw new Error(`${label} file must be a regular file: ${path}`);
+    if (stats.size > cliTextFileMaxBytes) throw new Error(`${label} file is too large: ${path} (max ${cliTextFileMaxBytes} bytes)`);
+    // Bound the READ itself rather than trusting stats.size alone: a regular file can grow between fstatSync
+    // and the read below (the fd is the same, but nothing stops another process from appending to the file
+    // in between), so read at most cliTextFileMaxBytes + 1 bytes directly from the descriptor and fail if that
+    // cap is exceeded, instead of handing the now-possibly-stale size to an unbounded readFileSync.
+    const buffer = Buffer.alloc(cliTextFileMaxBytes + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const n = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, null);
+      if (n === 0) break;
+      bytesRead += n;
+    }
+    if (bytesRead > cliTextFileMaxBytes) throw new Error(`${label} file is too large: ${path} (max ${cliTextFileMaxBytes} bytes)`);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function printLintPrTextHelp() {
   process.stdout.write(
     [
@@ -1503,8 +1540,7 @@ async function lintPrTextCli(args) {
   const commitMessages = Array.isArray(options.commit) ? options.commit : options.commit ? [options.commit] : undefined;
   let prBody = options.body;
   if (options.bodyFile) {
-    if (!existsSync(options.bodyFile)) throw new Error(`Body file not found: ${options.bodyFile}`);
-    prBody = readFileSync(options.bodyFile, "utf8");
+    prBody = readCliTextFile(options.bodyFile, "Body");
   }
   const linkedIssue = parsePositiveIntegerOption(options.linkedIssue, "--linked-issue");
   const payload = await apiPost("/v1/lint/pr-text", {
@@ -1562,8 +1598,7 @@ async function slopRiskCli(args) {
   let description = options.description ?? options.body;
   const descriptionFile = options.descriptionFile ?? options.bodyFile;
   if (descriptionFile) {
-    if (!existsSync(descriptionFile)) throw new Error(`Description file not found: ${descriptionFile}`);
-    description = readFileSync(descriptionFile, "utf8");
+    description = readCliTextFile(descriptionFile, "Description");
   }
   const changedFiles = stringArrayOption(options.changedFile).map(parseChangedFileSpec);
   const tests = stringArrayOption(options.test);
@@ -1600,8 +1635,7 @@ async function issueSlopCli(args) {
   const options = parseOptions(args);
   let body = normalizeOptionalStringOption(options.body);
   if (options.bodyFile) {
-    if (!existsSync(options.bodyFile)) throw new Error(`Body file not found: ${options.bodyFile}`);
-    body = readFileSync(options.bodyFile, "utf8");
+    body = readCliTextFile(options.bodyFile, "Body");
   }
   const title = normalizeOptionalStringOption(options.title);
   const payload = await apiPost("/v1/lint/issue-slop", {
