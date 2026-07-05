@@ -368,6 +368,51 @@ DISCORD_REPO_WEBHOOKS={"owner/repoA":"https://discord.com/api/webhooks/...","own
         ceiling depends entirely on the host's core count and how many runner replicas you run.
       </p>
 
+      <h3>Capacity planning: how much disk for N repos at M PRs/month</h3>
+      <p>
+        The 151GB host above is one measured point, not a formula. It says nothing about how disk
+        use grows as you register more repos or review more pull requests — for that you have to
+        reason about which tables and volumes actually grow with activity, versus which are fixed
+        overhead. Treat every number below as an order-of-magnitude estimate to plan around, not a
+        guarantee.
+      </p>
+      <FeatureRow
+        items={[
+          {
+            title: "review_audit (fixed overhead per PR, unbounded)",
+            description:
+              "Roughly 2 rows per PR — one finalized gate decision plus one realized merge/close outcome — each a few small text columns (well under 1KB/row). It has no retention policy in src/db/retention.ts, so it grows forever. Don't trust a blanket MB-per-thousand-PRs estimate here; measure your own instance's actual growth with pg_total_relation_size('review_audit') (or the equivalent SQLite page count) after a known number of PRs, then extrapolate from that.",
+          },
+          {
+            title: "webhook_events (fixed overhead per delivery, unbounded)",
+            description:
+              "One row per inbound GitHub webhook delivery — every push, comment, check-run update, and review event, not just PR opens — so it accrues considerably faster than review_audit for the same PR volume (commonly 5-15x, depending on how chatty a repo's CI and review activity are). Also absent from RETENTION_POLICY, so it also grows without bound. Still small per row; the growth to watch is row count over months, not any single row's size.",
+          },
+          {
+            title: "audit_events (bounded — 90-day retention)",
+            description:
+              "One row per privileged/security-relevant action (recordAuditEvent in src/db/repositories.ts), pruned automatically: RETENTION_POLICY in src/db/retention.ts keeps 90 days and the prune-retention job runs daily at 03:00 UTC (src/index.ts), so this table's steady-state size is capped regardless of how long the instance has been running — it will not be a long-term capacity driver the way the two tables above are.",
+          },
+          {
+            title: "Postgres/SQLite backup dumps (scales with live DB size x retained copies)",
+            description:
+              "scripts/backup.sh keeps the newest BACKUP_RETAIN copies per target (default 7 — see the backup and scaling doc's retention section), so total backup-volume usage is roughly (live database size) x (retained count), independent of repo count except through the database-size term. A growing, unpruned review_audit/webhook_events pair feeds directly into this multiplier: whatever they add to the live database, the backup volume carries N times over.",
+          },
+        ]}
+      />
+      <p>
+        Putting it together: for a small install (a handful of repos, tens of PRs/month), all of
+        this is noise against the ~20GB of fixed Docker/image/volume overhead measured above — you
+        will not notice review_audit or webhook_events growth for a long time. The estimate gets
+        real at higher volume: an install running hundreds of PRs/month across dozens of repos, left
+        unattended for a year or more, is a plausible case where the unbounded tables above (and the
+        backups that multiply them) become the dominant long-term disk driver rather than Docker
+        images and build cache. There is no first-party tool yet to prune review_audit or
+        webhook_events — if you operate at that scale, monitor their row counts directly (
+        <code>SELECT count(*) FROM review_audit</code>,{" "}
+        <code>SELECT count(*) FROM webhook_events</code>) rather than assuming steady state.
+      </p>
+
       <h2>Docker resource hygiene</h2>
       <p>
         Every service in <code>docker-compose.yml</code> caps its own container logs (10MB × 3
