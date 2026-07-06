@@ -319,6 +319,9 @@ export type UnifiedCommentBridgeArgs = {
    *  through to `buildUnifiedReviewInput`'s `reviewEffort`). No AI. Default OFF (the processor passes this only
    *  when the manifest opts in — see `resolveReviewPromptOverrides`'s `effortScore`). (#1955) */
   reviewEffort?: { band: 1 | 2 | 3 | 4 | 5; minutes: number } | undefined;
+  /** Read-only auto-merge conditions table (`review.auto_merge_summary` port). Default OFF — the processor passes
+   *  true only when the manifest opts in (see `resolveReviewPromptOverrides`'s `autoMergeSummary`). (#2051) */
+  autoMergeSummary?: boolean | undefined;
   /** Display-only caps from `review.max_findings` (#2049). */
   maxFindingsCaps?: { blockers: number | null; nits: number | null } | undefined;
   /** Line-anchored AI findings, one entry per inline finding (review.finding_categories port). When present +
@@ -480,6 +483,47 @@ export function buildChangedFilesSummaryCollapsible(files: ChangedFileSummaryInp
   return { title: "Changed files", body };
 }
 
+/** Read-only pass/fail flags for the auto-merge conditions table — derived from readiness facts the unified
+ *  comment already resolved; never re-derives merge/close decisions. (#2051) */
+export type AutoMergeSummaryInput = {
+  ciGreen: boolean;
+  gatePassing: boolean;
+  mergeableClean: boolean;
+  linkedIssueOk: boolean;
+};
+
+/** Derive the four auto-merge condition flags from signals the caller already computed for the comment. */
+export function deriveAutoMergeSummaryInput(args: {
+  mergeReadiness?: MergeReadiness | undefined;
+  gateConclusion: GateCheckConclusion;
+  panelRows: PublicPrPanelSignalRow[];
+}): AutoMergeSummaryInput {
+  const linkedRow = args.panelRows.find((row) => row.key === "linkedIssue");
+  const mergeLabel = args.mergeReadiness?.mergeStateLabel?.trim().toLowerCase();
+  return {
+    ciGreen: args.mergeReadiness?.ciState === "passed",
+    gatePassing: args.gateConclusion === "success",
+    mergeableClean: mergeLabel === "clean",
+    linkedIssueOk: linkedRow !== undefined && linkedRow.cells[1].startsWith("✅"),
+  };
+}
+
+/** Build the read-only "Auto-merge conditions" collapsible — a pass/fail table only; never changes decisions. */
+export function buildAutoMergeSummaryCollapsible(conditions: AutoMergeSummaryInput): UnifiedCollapsible {
+  const row = (label: string, ok: boolean): string => `| ${label} | ${ok ? "✅ pass" : "❌ fail"} |`;
+  const body = [
+    "_Read-only — does not change merge decisions._",
+    "",
+    "| Condition | Status |",
+    "| --- | --- |",
+    row("CI green", conditions.ciGreen),
+    row("Gate passing", conditions.gatePassing),
+    row("Mergeable (clean)", conditions.mergeableClean),
+    row("Linked issue", conditions.linkedIssueOk),
+  ].join("\n");
+  return { title: "Auto-merge conditions", body };
+}
+
 /** A finding's path + body — everything `buildFindingCategoryCollapsible` needs to use the finding's own
  *  `category` when present, or fall back to `classifyFindingCategory` when it isn't. Deliberately narrower than
  *  `InlineFinding` (no line/severity/suggestion) so the bridge's pure-rendering surface stays minimal. */
@@ -591,10 +635,22 @@ export function buildUnifiedCommentBody(args: UnifiedCommentBridgeArgs): string 
       : null;
   const withFindingCategories =
     findingCategoryCollapsible !== null ? [...(withChangedFiles ?? []), findingCategoryCollapsible] : withChangedFiles;
+  const autoMergeCollapsible =
+    args.autoMergeSummary === true
+      ? buildAutoMergeSummaryCollapsible(
+        deriveAutoMergeSummaryInput({
+          ...(args.mergeReadiness !== undefined ? { mergeReadiness: args.mergeReadiness } : {}),
+          gateConclusion: args.gate.conclusion,
+          panelRows: visibleRows,
+        }),
+      )
+    : null;
+  const withAutoMergeSummary =
+    autoMergeCollapsible !== null ? [...(withFindingCategories ?? []), autoMergeCollapsible] : withFindingCategories;
   // Visual-capture port: when before/after routes are present, append a "Visual preview" collapsible to the
   // extra sections. Flag-OFF (the processor passes no beforeAfter) ⇒ extraCollapsibles is unchanged.
   const visualCollapsible = args.beforeAfter && args.beforeAfter.length > 0 ? buildBeforeAfterCollapsible(args.beforeAfter) : null;
-  const withVisual = visualCollapsible !== null ? [...(withFindingCategories ?? []), visualCollapsible] : withFindingCategories;
+  const withVisual = visualCollapsible !== null ? [...(withAutoMergeSummary ?? []), visualCollapsible] : withAutoMergeSummary;
   // #3612: "Scroll preview" renders ALONGSIDE "Visual preview" (never replacing it) — self-host + gif:true
   // only, so this is null (no section, no behavior change) for every repo that hasn't opted in.
   const scrollCollapsible = args.beforeAfter && args.beforeAfter.length > 0 ? buildScrollPreviewCollapsible(args.beforeAfter) : null;
