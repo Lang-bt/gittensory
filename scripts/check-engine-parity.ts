@@ -12,6 +12,7 @@ export const ENGINE_PARITY_AREAS = Object.freeze(["review", "settings", "signals
 const ENGINE_SRC_ROOT = "packages/gittensory-engine/src";
 const HOST_SRC_ROOT = "src";
 const ENGINE_PACKAGE_JSON = "packages/gittensory-engine/package.json";
+const MINER_ENGINE_PIN_FILE = "packages/gittensory-miner/expected-engine.version";
 const ENGINE_PACKAGE_NAME = "@jsonbored/gittensory-engine";
 
 export type EngineParityPair = {
@@ -19,6 +20,8 @@ export type EngineParityPair = {
   fileName: string;
   hostRelative: string;
   engineRelative: string;
+  hostText: string;
+  engineText: string;
 };
 
 export type EngineParityReadFile = (root: string, relativePath: string) => string;
@@ -67,7 +70,9 @@ export function isThinEngineReExportShim(srcText: string): boolean {
   return /^export\s+(\{[\s\S]*\}|\*)\s+from\s+['"][^'"]*gittensory-engine[^'"]*['"];?\s*$/.test(stripped);
 }
 
-/** True when the engine twin is a placeholder stub (e.g. check-names) rather than a full parallel copy. */
+/** True when the engine twin is a placeholder stub (e.g. check-names) rather than a full parallel copy.
+ *  Thresholds mirror the 2026-07-08 audit: engine stubs were <250 non-whitespace chars while host copies were
+ *  3×+ larger (check-names ~14 lines vs engine ~2; review-thread-findings ~98 vs ~2). */
 export function isEngineStubPair(srcText: string, engineText: string): boolean {
   const compact = (text: string) => text.replace(/\s/g, "").length;
   const engineCompact = compact(engineText);
@@ -102,7 +107,7 @@ export function discoverEngineParityPairs({
       const engineText = readFile(root, engineRelative);
       if (isThinEngineReExportShim(hostText)) continue;
       if (isEngineStubPair(hostText, engineText)) continue;
-      pairs.push({ area, fileName, hostRelative, engineRelative });
+      pairs.push({ area, fileName, hostRelative, engineRelative, hostText, engineText });
     }
   }
   return pairs;
@@ -123,10 +128,8 @@ export function checkEngineParityDrift({
   const pairs = discoverEngineParityPairs({ root, readFile, listDir });
   const failures: string[] = [];
   for (const pair of pairs) {
-    const hostText = readFile(root, pair.hostRelative);
-    const engineText = readFile(root, pair.engineRelative);
-    const normalizedHost = normalizeEngineParityText(hostText);
-    const normalizedEngine = normalizeEngineParityText(engineText);
+    const normalizedHost = normalizeEngineParityText(pair.hostText);
+    const normalizedEngine = normalizeEngineParityText(pair.engineText);
     if (normalizedHost !== normalizedEngine) {
       failures.push(
         [
@@ -228,6 +231,34 @@ export function checkEngineVersionSkew({
   return { failures, installed, expected, skew };
 }
 
+/** Fail when the published-miner pin drifts from the monorepo engine package version. */
+export function checkMinerEngineVersionPinSync({
+  root,
+  readFile = defaultReadFile,
+  readExpected = (r) => defaultReadExpectedEngineVersion(r, readFile),
+}: {
+  root: string;
+  readFile?: EngineParityReadFile;
+  readExpected?: (root: string) => string | null;
+}): { failures: string[]; expected: string | null; pin: string | null } {
+  const failures: string[] = [];
+  const expected = readExpected(root);
+  let pin: string | null = null;
+  try {
+    pin = readFile(root, MINER_ENGINE_PIN_FILE).trim() || null;
+  } catch {
+    pin = null;
+  }
+  if (expected && pin && expected !== pin) {
+    failures.push(
+      `${MINER_ENGINE_PIN_FILE} (${pin}) is out of sync with ${ENGINE_PACKAGE_JSON} (${expected}).`,
+    );
+  } else if (expected && !pin) {
+    failures.push(`Could not read miner engine version pin from ${MINER_ENGINE_PIN_FILE}.`);
+  }
+  return { failures, expected, pin };
+}
+
 /** Run both the file-pair drift check and the version-skew check. */
 export function runEngineParityChecks(options: {
   root: string;
@@ -242,8 +273,9 @@ export function runEngineParityChecks(options: {
 } {
   const drift = checkEngineParityDrift(options);
   const skew = checkEngineVersionSkew(options);
+  const pinSync = checkMinerEngineVersionPinSync(options);
   return {
-    failures: [...drift.failures, ...skew.failures],
+    failures: [...drift.failures, ...skew.failures, ...pinSync.failures],
     pairsChecked: drift.pairsChecked,
     versionSkew: skew,
   };

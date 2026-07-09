@@ -78,10 +78,15 @@ export function readInstalledEnginePackageVersion() {
       join(__dirname, "../../gittensory-engine/package.json"),
     );
   } catch {
-    return readInstalledEnginePackageVersionFromPaths(
-      "",
-      join(__dirname, "../../gittensory-engine/package.json"),
-    );
+    const workspacePkg = join(__dirname, "../../gittensory-engine/package.json");
+    if (existsSync(workspacePkg)) {
+      try {
+        return JSON.parse(readFileSync(workspacePkg, "utf8")).version ?? null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 }
 

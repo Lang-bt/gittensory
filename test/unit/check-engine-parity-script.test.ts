@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   checkEngineParityDrift,
   checkEngineVersionSkew,
+  checkMinerEngineVersionPinSync,
   compareSemver,
   defaultReadExpectedEngineVersion,
   defaultResolveInstalledEngineVersion,
@@ -169,6 +170,19 @@ describe("check-engine-parity script", () => {
       } finally {
         rmSync(emptyRoot, { recursive: true, force: true });
       }
+    });
+
+    it("fails when the miner engine pin drifts from the monorepo engine package version", () => {
+      const result = checkMinerEngineVersionPinSync({
+        root: "/fake",
+        readFile: (_root, relativePath) => {
+          if (relativePath === "packages/gittensory-miner/expected-engine.version") return "0.1.0\n";
+          throw new Error(`unexpected read: ${relativePath}`);
+        },
+        readExpected: () => "0.2.0",
+      });
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0]).toContain("out of sync");
     });
 
     it("uses default version readers against the real monorepo workspace", () => {
