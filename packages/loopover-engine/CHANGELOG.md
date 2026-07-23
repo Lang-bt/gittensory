@@ -1,5 +1,30 @@
 # Changelog
 
+## [4.0.0](https://github.com/Lang-bt/gittensory/compare/engine-v3.0.0...engine-v4.0.0) (2026-07-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** every GITTENSORY_* environment variable is now LOOPOVER_*. No dual-read/alias, per the epic's full-cutover mandate. Operators must rename these in their .env / secrets before deploying this change.
+* **build:** every gittensory-prefixed directory under apps/ and packages/ is now loopover-prefixed, and the two extension packages' npm names changed from @jsonbored/gittensory-* to @loopover/*. No dual-path/alias, per the epic's full-cutover mandate.
+
+### Features
+
+* **build:** Phase 5 - full-cutover rename all gittensory-* directories to loopover-* ([#5743](https://github.com/Lang-bt/gittensory/issues/5743)) ([81e4ac3](https://github.com/Lang-bt/gittensory/commit/81e4ac34dfb4dee9c3cadefcc27a515617462da9))
+* **config:** Phase 6 - full-cutover rename internal GITTENSORY_* constants to LOOPOVER_* ([#5750](https://github.com/Lang-bt/gittensory/issues/5750)) ([12958f4](https://github.com/Lang-bt/gittensory/commit/12958f4f36cbf1f9f1ac732e718a4316e91cb103)), closes [#5705](https://github.com/Lang-bt/gittensory/issues/5705)
+* **engine:** add a load-testing harness for iterate-loop under concurrent load ([#5781](https://github.com/Lang-bt/gittensory/issues/5781)) ([4b6b5c6](https://github.com/Lang-bt/gittensory/commit/4b6b5c67f79b8c7610f1132e37779ca2bf1cdc8e)), closes [#5224](https://github.com/Lang-bt/gittensory/issues/5224)
+* **engine:** extract content-lane's pure leaf modules to loopover-engine ([#5775](https://github.com/Lang-bt/gittensory/issues/5775)) ([60ed3cd](https://github.com/Lang-bt/gittensory/commit/60ed3cd70560caa01fc633ab53df2d22eaf6ecec)), closes [#4880](https://github.com/Lang-bt/gittensory/issues/4880)
+* **engine:** extract settings leaf modules to loopover-engine ([#5779](https://github.com/Lang-bt/gittensory/issues/5779)) ([b570c11](https://github.com/Lang-bt/gittensory/commit/b570c114431bc4e94caec1dfc4473325cabddc93)), closes [#4879](https://github.com/Lang-bt/gittensory/issues/4879)
+* **mcp:** add the idea-intake bridge and loopover_intake_idea tool ([#5792](https://github.com/Lang-bt/gittensory/issues/5792)) ([d60481e](https://github.com/Lang-bt/gittensory/commit/d60481ec33c6004d8f59857a406ffd69695c9917)), closes [#4798](https://github.com/Lang-bt/gittensory/issues/4798)
+* **mcp:** deliver a completed loop iteration as a customer results payload ([#5797](https://github.com/Lang-bt/gittensory/issues/5797)) ([9b3f4b2](https://github.com/Lang-bt/gittensory/commit/9b3f4b276636fd119dcf973aa71003bd50df4d7e)), closes [#4801](https://github.com/Lang-bt/gittensory/issues/4801)
+* **mcp:** route ideas through intake into a loop claim plan ([#5795](https://github.com/Lang-bt/gittensory/issues/5795)) ([48d2a39](https://github.com/Lang-bt/gittensory/commit/48d2a3970e7dffb6c93dba1d0538fe401ec308a9)), closes [#4799](https://github.com/Lang-bt/gittensory/issues/4799)
+
+
+### Fixes
+
+* **rebrand:** full-cutover rename miner/AMS per-repo and operator config filenames ([#5765](https://github.com/Lang-bt/gittensory/issues/5765)) ([c93569d](https://github.com/Lang-bt/gittensory/commit/c93569dcd977ec7a6ec78157b6b40374f85f12cc))
+* **rebrand:** full-cutover rename remaining internal gittensory runtime identifiers ([#5761](https://github.com/Lang-bt/gittensory/issues/5761)) ([75450f1](https://github.com/Lang-bt/gittensory/commit/75450f1d597dbc54c46d6005ed540dad8512b071))
+
 ## [3.0.0](https://github.com/JSONbored/gittensory/compare/engine-v2.0.0...engine-v3.0.0) (2026-07-14)
 
 
